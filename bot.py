@@ -40,24 +40,57 @@ async def on_ready():
     print(f"! Helper online as {bot.user}")
 
 # ── AI RESPONSE FUNCTION ─────────────────
+import asyncio
+import re
+
+# Fallback list: try your favorite first, then rotate through other uncensored free models
+FREE_FALLBACK_MODELS = [
+    "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+    "nothingiisreal/mn-12b-celeste-v1.9:free",
+    "neversleep/llama-3.1-lumimaid-8b:free",
+    "thedrummer/cydonia-24b-v4.1:free",
+    "anthracite-org/magnum-v4-72b:free",
+    "nousresearch/deephermes-3-mistral-24b-preview:free",
+    "deepseek/deepseek-chat-v3.1:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+]
+
+REQUEST_LOCK = asyncio.Lock()
+RETRY_DELAY  = 0.5
+
 async def get_ai_response(message_content: str, username: str) -> str:
-    try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"User {username} says: {message_content}"}
-            ],
-            temperature=0.8,
-            max_tokens=4096,
-            extra_headers={
-                "HTTP-Referer": "http://discord.bot",
-                "X-Title": "Raging Sept Exploit Bot"
-            }
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"Error: {str(e)}"
+    last_err = "unknown error"
+    for idx, model in enumerate(FREE_FALLBACK_MODELS):
+        try:
+            async with REQUEST_LOCK:
+                await asyncio.sleep(RETRY_DELAY)
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": f"User {username} says: {message_content}"}
+                    ],
+                    temperature=0.8,
+                    max_tokens=4096,
+                    extra_headers={
+                        "HTTP-Referer": "http://discord.bot",
+                        "X-Title": "Raging Sept Exploit Bot"
+                    }
+                )
+            return resp.choices[0].message.content
+
+        except Exception as e:
+            err_str = str(e)
+            last_err = f"{model} → {e}"
+            if "429" in err_str:
+                delay_match = re.search(r'(\d+)\s*second', err_str)
+                wait = int(delay_match.group(1)) if delay_match else 3
+                print(f"[429] {model} – waiting {wait}s …")
+                await asyncio.sleep(wait)
+                continue
+            continue
+
+    return f"❌ All models down or rate‑limited.\nLast: {last_err}"
 
 # ── SLASH COMMAND: /fix ──────────────────
 @bot.tree.command(name="fix", description="Fix a bug in your Roblox exploit script")
