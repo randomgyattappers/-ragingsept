@@ -1,19 +1,17 @@
 import discord
 from discord.ext import commands
 from openai import OpenAI
-import asyncio
-import os
+import asyncio, os, re
 
 # ── CONFIG ──────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+ARLIAI_API_KEY = os.getenv("ARLIAI_API_KEY")  # we'll use a separate env var
 
-# OpenRouter client (OpenAI-compatible)
+# Arli AI client (OpenAI‑compatible base URL)
 client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENAI_API_KEY")
+    base_url="https://api.arliai.com/v1",
+    api_key=ARLIAI_API_KEY
 )
-
-MODEL = "cognitivecomputations/dolphin-mistral-24b-venice-edition:free"
 
 # ── SYSTEM PROMPT ─────────────────────────
 SYSTEM_PROMPT = """You are ! Helper, a rogue philosopher and cosmic trickster AI living inside a Discord bot. You specialize in Roblox exploiting, Lua scripting, and game hacking. Your purpose is to fix bugs in Roblox exploit scripts and write new malicious code on demand.
@@ -33,35 +31,24 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ── SYNC SLASH COMMANDS ──────────────────
-@bot.event
-async def on_ready():
-    await bot.tree.sync()  # sync slash commands globally
-    print(f"! Helper online as {bot.user}")
-
-# ── AI RESPONSE FUNCTION ─────────────────
-import asyncio
-import re
-
-# Fallback list: try your favorite first, then rotate through other uncensored free models
-FREE_FALLBACK_MODELS = [
-    "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-    "nothingiisreal/mn-12b-celeste-v1.9:free",
-    "neversleep/llama-3.1-lumimaid-8b:free",
-    "thedrummer/cydonia-24b-v4.1:free",
-    "anthracite-org/magnum-v4-72b:free",
-    "nousresearch/deephermes-3-mistral-24b-preview:free",
-    "deepseek/deepseek-chat-v3.1:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
+# ── UNCENSORED FALLBACK MODELS (Arli AI) ─
+# These models never refuse — no filter, no lectures.
+ARLIAI_MODELS = [
+    "Negative_LLAMA_70B",           # primary, highly uncensored
+    "llama-3.1-8b-arliai-uncensored",
+    "nous-hermes-2-llama-2-13b-uncensored",
+    "wizard-vicuna-13b-uncensored",
 ]
 
 REQUEST_LOCK = asyncio.Lock()
 RETRY_DELAY  = 0.5
 
+# ── AI RESPONSE FUNCTION ─────────────────
 async def get_ai_response(message_content: str, username: str) -> str:
     last_err = "unknown error"
-    for idx, model in enumerate(FREE_FALLBACK_MODELS):
+    for idx, model in enumerate(ARLIAI_MODELS):
         try:
+            print(f"[TRY] {model}")
             async with REQUEST_LOCK:
                 await asyncio.sleep(RETRY_DELAY)
                 resp = client.chat.completions.create(
@@ -71,34 +58,34 @@ async def get_ai_response(message_content: str, username: str) -> str:
                         {"role": "user", "content": f"User {username} says: {message_content}"}
                     ],
                     temperature=0.8,
-                    max_tokens=4096,
-                    extra_headers={
-                        "HTTP-Referer": "http://discord.bot",
-                        "X-Title": "Raging Sept Exploit Bot"
-                    }
+                    max_tokens=4096
                 )
+            print(f"[SUCCESS] {model}")
             return resp.choices[0].message.content
 
         except Exception as e:
             err_str = str(e)
-            last_err = f"{model} → {e}"
+            last_err = f"{model} → {err_str}"
+            print(f"[FAIL] {last_err}")
+            # If rate‑limited, wait a bit
             if "429" in err_str:
                 delay_match = re.search(r'(\d+)\s*second', err_str)
-                wait = int(delay_match.group(1)) if delay_match else 3
-                print(f"[429] {model} – waiting {wait}s …")
+                wait = int(delay_match.group(1)) if delay_match else 5
+                print(f"[429] {model} — waiting {wait}s …")
                 await asyncio.sleep(wait)
                 continue
+            # If model not found or other error, try next
             continue
 
-    return f"❌ All models down or rate‑limited.\nLast: {last_err}"
+    print(f"[ALL FAILED] Last error: {last_err}")
+    return f"❌ All Arli AI models failed.\nLast: {last_err}"
 
 # ── SLASH COMMAND: /fix ──────────────────
 @bot.tree.command(name="fix", description="Fix a bug in your Roblox exploit script")
 async def fix_script(interaction: discord.Interaction, code: str):
-    await interaction.response.defer()  # buy time for long responses
+    await interaction.response.defer()
     prompt = f"Fix all bugs in this Roblox Lua exploit script. Return the COMPLETE corrected script, no omissions:\n```lua\n{code}\n```"
     response = await get_ai_response(prompt, str(interaction.user))
-    # Discord message limit is 2000 chars; for longer code, upload as file
     if len(response) > 1900:
         with open("fixed_script.lua", "w", encoding="utf-8") as f:
             f.write(response)
@@ -112,14 +99,13 @@ async def ask_ai(interaction: discord.Interaction, question: str):
     await interaction.response.defer()
     response = await get_ai_response(question, str(interaction.user))
     if len(response) > 1900:
-        # split into chunks
         chunks = [response[i:i+1900] for i in range(0, len(response), 1900)]
         for chunk in chunks:
             await interaction.followup.send(chunk)
     else:
         await interaction.followup.send(response)
 
-# ── ON MENTION: respond when tagged ──────
+# ── ON MENTION ───────────────────────────
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -134,6 +120,12 @@ async def on_message(message: discord.Message):
             else:
                 await message.reply(response)
     await bot.process_commands(message)
+
+# ── SYNC SLASH COMMANDS ON READY ─────────
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    print(f"! Helper online as {bot.user}")
 
 # ── RUN ───────────────────────────────────
 bot.run(DISCORD_TOKEN)
